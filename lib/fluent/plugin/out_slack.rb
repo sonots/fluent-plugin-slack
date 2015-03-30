@@ -14,12 +14,15 @@ module Fluent
     config_param :webhook_url,          :string, default: nil # incoming webhook
     config_param :token,                :string, default: nil # api token
     config_param :username,             :string, default: 'fluentd'
-    config_param :color,                :string, default: 'good'
     config_param :icon_emoji,           :string, default: nil
     config_param :icon_url,             :string, default: nil
     config_param :auto_channels_create, :bool,   default: false
     config_param :https_proxy,          :string, default: nil
 
+    config_param :color,                :string, default: 'good'
+    config_param :color_keys,           default: nil do |val|
+      val.split(',')
+    end
     config_param :channel,              :string
     config_param :channel_keys,         default: nil do |val|
       val.split(',')
@@ -96,6 +99,13 @@ module Fluent
           raise Fluent::ConfigError, "string specifier '%s' for `channel` and `channel_keys` specification mismatch"
         end
       end
+      if @color_keys
+        begin
+          @color % (['1'] * @color_keys.length)
+        rescue ArgumentError
+          raise Fluent::ConfigError, "string specifier '%s' for `color` and `color_keys` specification mismatch"
+        end
+      end
 
       if @icon_emoji and @icon_url
         raise Fluent::ConfigError, "either of `icon_emoji` or `icon_url` can be specified"
@@ -149,19 +159,24 @@ module Fluent
       ch_fields = {}
       chunk.msgpack_each do |tag, time, record|
         channel = build_channel(record)
+        color   = build_color(record)
         per     = tag # title per tag
-        ch_fields[channel]      ||= {}
-        ch_fields[channel][per] ||= Field.new(build_title(record), '')
-        ch_fields[channel][per].value << "#{build_message(record)}\n"
+        ch_fields[channel]             ||= {}
+        ch_fields[channel][color]      ||= {}
+        ch_fields[channel][color][per] ||= Field.new(build_title(record), '')
+        ch_fields[channel][color][per].value << "#{build_message(record)}\n"
       end
-      ch_fields.map do |channel, fields|
+      ch_fields.map do |channel, color_fields|
+        attachments = color_fields.map do |color, fields|
+          {
+            :color    => color,
+            :fallback => fields.values.map(&:title).join(' '), # fallback is the message shown on popup
+            :fields   => fields.values.map(&:to_h),
+          }
+        end
         {
           channel: channel,
-          attachments: [{
-            :color    => @color,
-            :fallback => fields.values.map(&:title).join(' '), # fallback is the message shown on popup
-            :fields   => fields.values.map(&:to_h)
-          }],
+          attachments: attachments,
         }.merge(common_payload)
       end
     end
@@ -170,17 +185,22 @@ module Fluent
       messages = {}
       chunk.msgpack_each do |tag, time, record|
         channel = build_channel(record)
-        messages[channel] ||= ''
-        messages[channel] << "#{build_message(record)}\n"
+        color   = build_color(record)
+        messages[channel]        ||= {}
+        messages[channel][color] ||= ''
+        messages[channel][color] << "#{build_message(record)}\n"
       end
-      messages.map do |channel, text|
-        {
-          channel: channel,
-          attachments: [{
-            :color    => @color,
+      messages.map do |channel, color_text|
+        attachments = color_text.map do |color, text|
+          {
+            :color    => color,
             :fallback => text,
             :text     => text,
-          }],
+          }
+        end
+        {
+          channel: channel,
+          attachments: attachments,
         }.merge(common_payload)
       end
     end
@@ -202,6 +222,13 @@ module Fluent
 
       values = fetch_keys(record, @channel_keys)
       @channel % values
+    end
+
+    def build_color(record)
+      return @color unless @color_keys
+
+      values = fetch_keys(record, @color_keys)
+      @color % values
     end
 
     def fetch_keys(record, keys)
